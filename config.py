@@ -106,6 +106,11 @@ SUB2API_GROUP = _env("SUB2API_GROUP", "codex")  # 目标分组名，需先在 SU
 WEBCHAT2API_URL = _env("WEBCHAT2API_URL", "")
 WEBCHAT2API_KEY = _env("WEBCHAT2API_KEY", "")
 
+# chatgpt2api（basketikun/chatgpt2api 普通网页号导入，POST <url>/api/accounts）
+# register_chatgpt.py --import-c2a 注册成功后逐个上传时用
+CHATGPT2API_URL = _env("CHATGPT2API_URL", "")  # 对端 host（见 .env）
+CHATGPT2API_KEY = _env("CHATGPT2API_KEY", "")  # 对端 admin key（Authorization: Bearer）
+
 # ---------------------------------------------------------------- 订阅授权入口
 # Codex / ChatGPT Plus：baxigpt.com（卡密 + 账号 access_token → 开通 Plus）
 BAXI_API = _env("BAXI_API", "https://baxigpt.com")

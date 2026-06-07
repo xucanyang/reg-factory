@@ -302,6 +302,54 @@ def build_cpa_codex_json_from_oauth(cred, email=""):
     return build_cpa_codex_json(pseudo_session, email=email or c.get("email", ""))
 
 
+# ============================================================ chatgpt2api 普通网页号导入格式
+def build_chatgpt2api_account(session, email=""):
+    """ChatGPT 网页 session -> chatgpt2api(basketikun/chatgpt2api)普通号导入对象。
+
+    与 CPA codex 不同:这里导的是**普通网页号**,只认 access_token,不带 type:"codex"
+    (带 codex 会被对端当成 codex 源,见 account_service._prepare_account_payload)。
+    对端 POST /api/accounts 的 accounts 数组里,每个对象只有 access_token 是必需,
+    其余可选;type 走号池套餐类型(free/Plus/Pro...),没有则对端默认 free。
+    无 accessToken 抛 ValueError。"""
+    sess = session if _is_obj(session) else {}
+    access_token = _s(sess.get("accessToken")) or _s(sess.get("access_token"))
+    if not access_token:
+        raise ValueError("未读取到可导入的 ChatGPT accessToken。")
+
+    access_payload = parse_jwt_payload(access_token) or {}
+    access_auth = _get_claim_section(access_payload, OPENAI_AUTH_CLAIM)
+    profile = _get_claim_section(access_payload, OPENAI_PROFILE_CLAIM)
+
+    user = sess.get("user") if _is_obj(sess.get("user")) else {}
+    account = sess.get("account") if _is_obj(sess.get("account")) else {}
+    email_val = _first_non_empty(
+        _email_or_empty(user.get("email")),
+        _email_or_empty(sess.get("email")),
+        _email_or_empty(email),
+        _email_or_empty(profile.get("email")),
+        _email_or_empty(access_payload.get("email")),
+    )
+    account_id = _first_non_empty(
+        account.get("id"), sess.get("account_id"),
+        access_auth.get("chatgpt_account_id"),
+    )
+    # 套餐类型映射成对端号池类型;free/Plus/Pro... 对端会再归一化,这里给原始值即可
+    plan_type = _first_non_empty(
+        account.get("planType"), account.get("plan_type"),
+        sess.get("planType"), sess.get("plan_type"),
+        access_auth.get("chatgpt_plan_type"),
+    )
+
+    item = {"access_token": access_token, "source_type": "web"}
+    if email_val:
+        item["email"] = email_val
+    if account_id:
+        item["account_id"] = account_id
+    if plan_type:
+        item["type"] = plan_type
+    return item
+
+
 # ============================================================ SUB2API 导入 content
 def build_sub2api_content(session):
     """ChatGPT session -> SUB2API 导入 content 字符串。对齐 sub2api-api.js buildCodexSessionImportContent。
@@ -371,6 +419,16 @@ def save_chatgpt_tokens(session, email=""):
     except Exception as e:
         # session 已落盘,CPA 转换失败不致命(上传脚本可重试)
         print(f"  [chatgpt] session saved: {session_path} (CPA 转换跳过: {e})")
+
+    # chatgpt2api 普通网页号导入对象(单账号文件,后续可聚合成 accounts 数组一键导入)
+    try:
+        c2a = build_chatgpt2api_account(session, email=email)
+        c2a_path = os.path.join(pdir, f"c2a-{name}.json")
+        with open(c2a_path, "w", encoding="utf-8") as f:
+            json.dump(c2a, f, indent=2, ensure_ascii=False)
+        print(f"  [chatgpt] chatgpt2api token saved: {c2a_path}")
+    except Exception as e:
+        print(f"  [chatgpt] chatgpt2api 转换跳过: {e}")
     return True
 
 

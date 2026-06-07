@@ -28,6 +28,11 @@ from common.mailbox import get_code_by_token, get_code_outlook_pw
 from common.cookies import save_platform_cookies
 from common import emails as email_pool
 
+try:
+    from config import CHATGPT2API_URL, CHATGPT2API_KEY
+except Exception:
+    CHATGPT2API_URL, CHATGPT2API_KEY = "", ""
+
 PLATFORM = "chatgpt"
 SIGNUP_URL = "https://chatgpt.com/auth/login"
 KEY_COOKIES = ["__Secure-next-auth.session-token", "__Secure-next-auth.session-token.0"]
@@ -37,6 +42,9 @@ FIXED_EMAIL = None
 FIXED_PASSWORD = None
 FIXED_REFRESH_TOKEN = None
 FIXED_CLIENT_ID = None
+IMPORT_C2A = False  # 注册成功后即时把 token 导入 chatgpt2api（--import-c2a 开启）
+C2A_URL = None  # chatgpt2api host（默认取 config.CHATGPT2API_URL）
+C2A_KEY = None  # chatgpt2api admin key（默认取 config.CHATGPT2API_KEY）
 
 # OpenAI 发件人 / 验证码邮件特征
 OAI_SENDER = ("openai.com", "noreply@", "no-reply@")
@@ -160,6 +168,28 @@ async def detect_challenge(page):
         return await page.locator(sel).count() > 0
     except Exception:
         return False
+
+
+def import_chatgpt2api(session, email):
+    """注册成功后把单个号的 token 导入 chatgpt2api（--import-c2a）。
+    用注册时已抓到的 session 直接构造导入对象并 POST，避免再抓一次。
+    失败只打印告警，不影响注册成功判定。"""
+    if not session:
+        print("  [c2a] 无 session，跳过导入")
+        return
+    host = C2A_URL or CHATGPT2API_URL
+    key = C2A_KEY or CHATGPT2API_KEY
+    if not (host and key):
+        print("  [c2a] 未配置 CHATGPT2API_URL/KEY（--c2a-url/--c2a-key 或 .env），跳过导入")
+        return
+    try:
+        from common.session_export import build_chatgpt2api_account
+        from export_chatgpt2api import import_accounts
+        account = build_chatgpt2api_account(session, email=email)
+        ok, msg = import_accounts(host, key, [account])
+        print(f"  [c2a] import {email}: {'OK' if ok else 'FAIL'} - {msg}")
+    except Exception as e:
+        print(f"  [c2a] 导入失败: {str(e)[:120]}")
 
 
 async def register_one(index, total, p):
@@ -329,6 +359,7 @@ async def register_one(index, total, p):
                     await dump_state(page, "after-code-retry")
             else:
                 print("  no code received")
+                # 收不到码：只从 chatgpt 平台拉黑（记 emails_error_chatgpt.txt），其它平台仍可取
                 email_pool.mark_error(PLATFORM, email, email_pw, "no_code")
         check_timeout()
 
@@ -359,6 +390,11 @@ async def register_one(index, total, p):
                 print("  [WARN] 未取到 chatgpt session（可能未完全登录）")
         except Exception as e:
             print(f"  [WARN] 保存标准 token 失败: {e}")
+            sess = None
+
+        # 即时导入 chatgpt2api（--import-c2a；用刚抓到的 session 直接 POST，单号失败不影响注册成功）
+        if IMPORT_C2A:
+            import_chatgpt2api(sess, email)
 
         if key_val:
             email_pool.mark_used(PLATFORM, email, email_pw)
@@ -595,15 +631,26 @@ async def main():
     parser.add_argument("--password", default=None, help="指定邮箱密码")
     parser.add_argument("--refresh-token", default=None, help="指定 Outlook refresh_token")
     parser.add_argument("--client-id", default=None, help="指定 Outlook OAuth client_id")
+    parser.add_argument("--import-c2a", action="store_true",
+                        help="注册成功后即时把 token 导入 chatgpt2api (POST <host>/api/accounts)")
+    parser.add_argument("--c2a-url", default=None, help="chatgpt2api host (默认取 config.CHATGPT2API_URL)")
+    parser.add_argument("--c2a-key", default=None, help="chatgpt2api admin key (默认取 config.CHATGPT2API_KEY)")
     args = parser.parse_args()
 
     global REGISTER_TIMEOUT, KEEP_ON_FAIL, FIXED_EMAIL, FIXED_PASSWORD, FIXED_REFRESH_TOKEN, FIXED_CLIENT_ID
+    global IMPORT_C2A, C2A_URL, C2A_KEY
     REGISTER_TIMEOUT = args.timeout
     KEEP_ON_FAIL = args.keep_on_fail
     FIXED_EMAIL = args.email
     FIXED_PASSWORD = args.password
     FIXED_REFRESH_TOKEN = args.refresh_token
     FIXED_CLIENT_ID = args.client_id
+    IMPORT_C2A = args.import_c2a
+    C2A_URL = args.c2a_url
+    C2A_KEY = args.c2a_key
+
+    if IMPORT_C2A and not ((C2A_URL or CHATGPT2API_URL) and (C2A_KEY or CHATGPT2API_KEY)):
+        print("  [c2a][WARN] 已开 --import-c2a 但未配置 CHATGPT2API_URL/KEY（--c2a-url/--c2a-key 或 .env），导入会被跳过")
 
     print("=" * 50)
     print(f"  ChatGPT Auto Register  count={args.count} concurrency={args.concurrency}")

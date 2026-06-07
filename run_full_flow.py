@@ -16,6 +16,8 @@ Stage A 本身是个常驻循环，这里把它当子进程拉起、盯着 email
 用法：
   python run_full_flow.py                          # 注册1个邮箱 -> 在 claude 上注册
   python run_full_flow.py --platforms claude chatgpt
+  python run_full_flow.py --platforms chatgpt --rounds 10   # 循环注册 10 个号
+  python run_full_flow.py --platforms chatgpt --rounds 0    # 无限循环（Ctrl+C 停）
   python run_full_flow.py --skip-email --email a@outlook.com --password xxx   # 跳过邮箱注册
   python run_full_flow.py --email-attempts 20 --email-timeout 180
   python run_full_flow.py --dry-run                # 只打印将要执行的命令
@@ -162,11 +164,42 @@ def stage_platforms(args, env, email, password):
     ]
     if args.keep_on_fail:
         cmd.append("--keep-on-fail")
+    if args.import_c2a:
+        cmd.append("--import-c2a")  # 透传给 register_three_platforms -> register_chatgpt
     log(f"Stage B cmd: {' '.join(cmd)}", "B")
     if args.dry_run:
         return 0
     proc = subprocess.Popen(cmd, cwd=ROOT, env=env)
     return proc.wait()
+
+
+# ---------------------------------------------------------------- 单轮
+def run_once(args, env):
+    """跑一轮 A+B。返回 Stage B 的 exit code（0=成功）；没拿到邮箱返回 1。"""
+    t0 = time.time()
+    # Stage A
+    if args.skip_email:
+        if not args.email:
+            raise SystemExit("--skip-email 需要同时给 --email")
+        email, password = args.email.strip(), args.password.strip()
+        log(f"跳过邮箱注册，直接用 {email}", "A")
+    else:
+        got = stage_email(args, env)
+        if not got:
+            log("Stage A 没拿到可用邮箱，本轮终止", "ERR")
+            return 1, ""
+        email, password = got
+        # emails.txt 里可能没记密码，用快照里的
+        password = password or args.password
+
+    # Stage B
+    print("=" * 64)
+    rc = stage_platforms(args, env, email, password)
+    print("=" * 64)
+    dt = time.time() - t0
+    log(f"本轮结束  email={email}  Stage B exit={rc}  用时 {dt:.0f}s",
+        "OK" if rc == 0 else "WARN")
+    return rc, email
 
 
 # ---------------------------------------------------------------- main
@@ -180,6 +213,10 @@ def main():
     ap.add_argument("--email-timeout", type=int, default=180, help="单次邮箱注册硬超时(s)")
     ap.add_argument("--email-total-timeout", type=int, default=1800, help="Stage A 总超时(s)")
     ap.add_argument("--max-press", default="3", help="人机验证按住次数上限")
+    # 循环
+    ap.add_argument("--rounds", type=int, default=1,
+                    help="循环注册轮数；1=只跑一次(默认)，0=无限循环(Ctrl+C 停)")
+    ap.add_argument("--round-sleep", type=int, default=5, help="每轮之间间隔(s)")
     # Stage B
     ap.add_argument("--platforms", nargs="+", choices=["claude", "chatgpt", "grok"],
                     default=["claude"], help="默认只跑 claude（最稳）；grok 已知死结")
@@ -187,6 +224,8 @@ def main():
     ap.add_argument("--platform-timeout", type=int, default=600)
     ap.add_argument("--broker", default="", help="共享取码服务URL；默认空=各脚本自行开 Outlook 取码")
     ap.add_argument("--keep-on-fail", action="store_true")
+    ap.add_argument("--import-c2a", action="store_true",
+                    help="chatgpt 注册成功后即时把 token 导入 chatgpt2api（透传到底层 register_chatgpt.py）")
     # 基建
     ap.add_argument("--proxy", default=PROXY_DEFAULT, help="HTTP(S)_PROXY；传空串禁用")
     ap.add_argument("--clash-api", default=CLASH_API_DEFAULT)
@@ -197,35 +236,46 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="只打印命令不执行")
     args = ap.parse_args()
 
+    if args.skip_email and args.rounds != 1:
+        # --skip-email 每轮都用同一个固定邮箱，循环没意义（甚至会重复注册同号）
+        raise SystemExit("--skip-email 只能跑单轮，不能配合 --rounds")
+
     env = build_child_env(args)
-    t0 = time.time()
+    t_all = time.time()
     print("=" * 64)
-    log(f"全流程开始  proxy={args.proxy or 'OFF'}  clash={args.clash_api}")
+    mode = "无限" if args.rounds == 0 else f"{args.rounds} 轮"
+    log(f"全流程开始（循环 {mode}）  proxy={args.proxy or 'OFF'}  clash={args.clash_api}")
     print("=" * 64)
 
-    # Stage A
-    if args.skip_email:
-        if not args.email:
-            raise SystemExit("--skip-email 需要同时给 --email")
-        email, password = args.email.strip(), args.password.strip()
-        log(f"跳过邮箱注册，直接用 {email}", "A")
-    else:
-        got = stage_email(args, env)
-        if not got:
-            log("Stage A 没拿到可用邮箱，终止全流程", "ERR")
-            return 1
-        email, password = got
-        # emails.txt 里可能没记密码，用快照里的
-        password = password or args.password
+    ok = fail = 0
+    rnd = 0
+    last_rc = 0
+    try:
+        while args.rounds == 0 or rnd < args.rounds:
+            rnd += 1
+            print("#" * 64)
+            log(f"===== 第 {rnd} 轮{'' if args.rounds == 0 else f'/{args.rounds}'} =====")
+            print("#" * 64)
+            rc, _email = run_once(args, env)
+            last_rc = rc
+            if rc == 0:
+                ok += 1
+            else:
+                fail += 1
+            # 最后一轮不必再睡
+            more = args.rounds == 0 or rnd < args.rounds
+            if more and args.round_sleep > 0 and not args.dry_run:
+                log(f"本轮完成，{args.round_sleep}s 后进入下一轮（Ctrl+C 可停）")
+                time.sleep(args.round_sleep)
+    except KeyboardInterrupt:
+        log("收到 Ctrl+C，停止循环", "WARN")
 
-    # Stage B
+    dt = time.time() - t_all
     print("=" * 64)
-    rc = stage_platforms(args, env, email, password)
-    print("=" * 64)
-    dt = time.time() - t0
-    log(f"全流程结束  email={email}  Stage B exit={rc}  用时 {dt:.0f}s",
-        "OK" if rc == 0 else "WARN")
-    return rc
+    log(f"全部结束  共 {rnd} 轮  成功 {ok}  失败 {fail}  总用时 {dt:.0f}s",
+        "OK" if fail == 0 and ok > 0 else "WARN")
+    # 退出码：全成功 0；否则沿用最后一轮的非零码（单轮场景行为不变）
+    return 0 if fail == 0 and ok > 0 else (last_rc or 1)
 
 
 if __name__ == "__main__":

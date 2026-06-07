@@ -60,6 +60,8 @@ def build_command(platform, args, account):
             cmd += ["--client-id", client_id]
         if args.keep_on_fail:
             cmd.append("--keep-on-fail")
+        if getattr(args, "import_c2a", False):
+            cmd.append("--import-c2a")  # 注册成功后即时导入 chatgpt2api
         return cmd
 
     if platform == "grok":
@@ -188,6 +190,8 @@ async def main():
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--node", default="auto", help="Grok Clash node")
     parser.add_argument("--keep-on-fail", action="store_true")
+    parser.add_argument("--import-c2a", action="store_true",
+                        help="chatgpt 注册成功后即时把 token 导入 chatgpt2api（透传给 register_chatgpt.py）")
     # broker + loop
     parser.add_argument("--broker", default="http://127.0.0.1:8765", help="共享取码服务 URL；传空串 '' 禁用")
     parser.add_argument("--grok-timeout", type=int, default=40, help="Grok 取码 broker 超时(秒，outlook 注定超时故调短)")
